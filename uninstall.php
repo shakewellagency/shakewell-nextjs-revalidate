@@ -2,7 +2,7 @@
 /**
  * Removes everything the plugin stored when it is deleted from the Plugins screen.
  *
- * @package Shakewell\PluginTemplate
+ * @package Shakewell\NextjsRevalidate
  */
 
 defined( 'WP_UNINSTALL_PLUGIN' ) || exit;

@@ -1,6 +1,6 @@
 {
-    "name": "shakewellagency/shakewell-plugin-template",
-    "description": "Starting point for Shakewell WordPress plugins.",
+    "name": "shakewellagency/shakewell-nextjs-revalidate",
+    "description": "Tells a headless Next.js front end which pages to revalidate when WordPress content changes.",
     "type": "wordpress-plugin",
     "license": "GPL-2.0-or-later",
     "authors": [

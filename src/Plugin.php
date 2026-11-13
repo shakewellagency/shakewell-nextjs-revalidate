@@ -2,17 +2,15 @@
 /**
  * Plugin bootstrap.
  *
- * @package Shakewell\PluginTemplate
+ * @package Shakewell\NextjsRevalidate
  */
 
-namespace Shakewell\PluginTemplate;
+namespace Shakewell\NextjsRevalidate;
 
 defined( 'ABSPATH' ) || exit;
 
 /**
- * Wires the plugin into WordPress. Keep this thin: register hooks here, put the work in small classes.
- *
- * Translations need no code: WordPress loads them for the plugin's slug automatically.
+ * Wires the plugin into WordPress. Registers its hooks always, so a filter added later by a theme still counts. Nothing is sent until an endpoint and a secret are configured.
  */
 final class Plugin {
 
@@ -20,5 +18,9 @@ final class Plugin {
 	 * Registers hooks. Called on plugins_loaded.
 	 */
 	public static function boot(): void {
+		Collector::boot();
+		if ( defined( 'WP_CLI' ) && WP_CLI ) {
+			\WP_CLI::add_command( 'shakewell-nextjs-revalidate', array( Cli::class, 'run' ) );
+		}
 	}
 }
