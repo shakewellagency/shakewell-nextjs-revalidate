@@ -25,15 +25,15 @@
 	<rule ref="WordPress.WP.I18n">
 		<properties>
 			<property name="text_domain" type="array">
-				<element value="shakewell-plugin-template"/>
+				<element value="shakewell-nextjs-revalidate"/>
 			</property>
 		</properties>
 	</rule>
 	<rule ref="WordPress.NamingConventions.PrefixAllGlobals">
 		<properties>
 			<property name="prefixes" type="array">
-				<element value="shakewell_plugin_template"/>
-				<element value="Shakewell\PluginTemplate"/>
+				<element value="shakewell_nextjs_revalidate"/>
+				<element value="Shakewell\NextjsRevalidate"/>
 			</property>
 		</properties>
 	</rule>
