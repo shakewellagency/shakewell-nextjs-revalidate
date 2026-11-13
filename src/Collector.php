@@ -86,6 +86,13 @@ final class Collector {
 	private static array $old_paths = array();
 
 	/**
+	 * Posts whose address changed in this request: id => array( old address, new address ). Their children moved with them.
+	 *
+	 * @var array<int,array{0:string,1:string}>
+	 */
+	private static array $moved = array();
+
+	/**
 	 * Whether the shutdown hook is registered.
 	 *
 	 * @var bool
@@ -181,6 +188,9 @@ final class Collector {
 					$kind = 'trash' === $after->post_status ? 'trash' : 'unpublish';
 				}
 				// The old object still has the old slug and parent, so an address change refreshes the old page too.
+				if ( $was && 'slug_change' === $kind ) {
+					self::$moved[ (int) $after->ID ] = array( (string) self::path_of( $before ), (string) self::path_of( $after ) );
+				}
 				if ( $was ) {
 					self::queue_post( $before, $kind );
 				}
@@ -243,9 +253,13 @@ final class Collector {
 					return; // Its changed fields arrive through on_option, so a save that changes nothing refreshes nothing.
 				} elseif ( is_string( $post_id ) && 1 === preg_match( '/^term_(\d+)$/', $post_id, $m ) ) {
 					self::queue_term( (int) $m[1], null );
-				} elseif ( is_string( $post_id ) && 0 === strncmp( $post_id, 'user_', 5 ) ) {
-					return; // No page shows users.
+				} elseif ( is_string( $post_id ) && ( 0 === strncmp( $post_id, 'user_', 5 ) || 0 === strncmp( $post_id, 'comment_', 8 ) ) ) {
+					return; // No page shows users, and a comment form with fields must not refresh the site on every comment.
+				} elseif ( is_string( $post_id ) && ( 0 === strncmp( $post_id, 'menu_', 5 ) || 0 === strncmp( $post_id, 'nav_menu_item_', 14 ) ) ) {
+					self::queue_site( 'menu' );
 				} else {
+					// Widgets, blocks and anything unclassified: site-wide, the safe side. Options pages with a custom post_id store
+					// their fields as <post_id>_<field>, which this plugin cannot tell from other options, so they are not covered.
 					self::queue_site( 'other' );
 				}
 			}
@@ -397,14 +411,29 @@ final class Collector {
 	 */
 	public static function on_object_terms( $object_id, $terms = array(), $tt_ids = array(), $taxonomy = '', $append = false, $old_tt_ids = array() ): void {
 		self::guard(
-			function () use ( $object_id, $tt_ids, $old_tt_ids ) {
+			function () use ( $object_id, $taxonomy, $tt_ids, $old_tt_ids ) {
 				$new = array_map( 'intval', (array) $tt_ids );
 				$old = array_map( 'intval', (array) $old_tt_ids );
 				if ( array_diff( $new, $old ) || array_diff( $old, $new ) ) {
-					self::$membership[ (int) $object_id ] = true;
+					self::mark_membership( (int) $object_id, (string) $taxonomy );
 				}
 			}
 		);
+	}
+
+	/**
+	 * A published post may now be in or out of a list. Marks it, and queues the post itself so that a change made outside a
+	 * post save (cron, import, REST meta update) is not lost. A save that follows queues the same post again, which costs nothing.
+	 *
+	 * @param int    $post_id  Post id.
+	 * @param string $taxonomy Taxonomy when the change is a term change.
+	 */
+	private static function mark_membership( int $post_id, string $taxonomy = '' ): void {
+		self::$membership[ $post_id ] = true;
+		$post                         = get_post( $post_id );
+		if ( $post && 'publish' === $post->post_status && ( '' === $taxonomy || is_object_in_taxonomy( $post->post_type, $taxonomy ) ) ) {
+			self::queue_post( $post, 'update' );
+		}
 	}
 
 	/**
@@ -420,7 +449,7 @@ final class Collector {
 				if ( in_array( $key, self::MEDIA_META, true ) ) {
 					self::on_media( (int) $object_id );
 				} elseif ( in_array( $key, (array) Config::get( 'membership_meta', array() ), true ) ) {
-					self::$membership[ (int) $object_id ] = true;
+					self::mark_membership( (int) $object_id );
 				}
 			}
 		);
@@ -607,6 +636,7 @@ final class Collector {
 	 */
 	public static function flush(): ?array {
 		self::add_moved_posts();
+		self::add_moved_children();
 		self::add_membership_types();
 		self::add_related_posts();
 		$body    = self::body();
@@ -635,6 +665,7 @@ final class Collector {
 		self::$entries         = array();
 		self::$site            = array();
 		self::$old_paths       = array();
+		self::$moved           = array();
 		self::$membership      = array();
 		self::$created         = array();
 		self::$shutdown_hooked = false;
@@ -715,6 +746,7 @@ final class Collector {
 			if ( null === $now || $now === $old || ! self::valid_path( $old ) ) {
 				continue;
 			}
+			self::$moved[ $id ]         = array( $old, $now );
 			self::$paths[ $old ]        = true;
 			self::$paths[ $now ]        = true;
 			self::$items[ "path:$old" ] = true;
@@ -729,12 +761,50 @@ final class Collector {
 	}
 
 	/**
+	 * A hierarchical post that moved takes its children with it: /parent/child/ becomes /renamed/child/. Refreshes both
+	 * addresses of each published descendant. More than the limit: everything.
+	 */
+	private static function add_moved_children(): void {
+		$max = self::max_targets();
+		foreach ( self::$moved as $id => list( $old, $now ) ) {
+			$post = get_post( $id );
+			if ( ! $post || ! is_post_type_hierarchical( $post->post_type ) || '' === $old || '' === $now ) {
+				continue;
+			}
+			$children = get_pages(
+				array(
+					'child_of'    => $id,
+					'post_type'   => $post->post_type,
+					'post_status' => 'publish',
+					'number'      => $max + 1,
+				)
+			);
+			if ( count( $children ) > $max ) {
+				self::$site['other'] = true;
+				return;
+			}
+			foreach ( $children as $child ) {
+				$new = self::path_of( $child );
+				if ( null === $new || 0 !== strncmp( $new, $now, strlen( $now ) ) ) {
+					continue;
+				}
+				$was                        = $old . substr( $new, strlen( $now ) );
+				self::$paths[ $was ]        = true;
+				self::$paths[ $new ]        = true;
+				self::$items[ "path:$was" ] = true;
+				self::$items[ "path:$new" ] = true;
+			}
+		}
+	}
+
+	/**
 	 * Lists of a post type may have gained or lost a member when an item appears, goes, moves, or has its terms, date, parent
 	 * or membership meta changed. A plain update only changes the places that already show it.
 	 */
 	private static function add_membership_types(): void {
 		foreach ( self::$entries as $id => $e ) {
-			if ( isset( self::listings()[ $e['postType'] ] ) && ( 'update' !== $e['kind'] || isset( self::$membership[ $id ] ) ) ) {
+			$lists = isset( self::listings()[ $e['postType'] ] ) || in_array( $e['postType'], (array) Config::get( 'menu_types', array() ), true );
+			if ( $lists && ( 'update' !== $e['kind'] || isset( self::$membership[ $id ] ) ) ) {
 				self::$types[ $e['postType'] ] = true;
 			}
 		}
@@ -742,19 +812,28 @@ final class Collector {
 
 	/**
 	 * Posts that show another post's data without linking to it. The related setting maps a source post type to a list of
-	 * { post_type, meta_key }: when a source post changes, the published posts of post_type whose meta_key holds its id
-	 * (a plain id, or a serialised list as Advanced Custom Fields stores it) are refreshed. Too many for one request: the
-	 * whole related type instead.
+	 * { post_type, meta_key }: when source posts change, the published posts of post_type whose meta_key holds one of their
+	 * ids (a plain id, or a serialised list as Advanced Custom Fields stores it) are refreshed. This is one query per rule,
+	 * however many posts changed. Too many changed posts, or too many results: the whole related type instead.
 	 */
 	private static function add_related_posts(): void {
 		$related = (array) Config::get( 'related', array() );
-		$paths   = array();
 		$max     = self::max_targets();
+		$paths   = array();
+		$ids_of  = array();
 		foreach ( self::$entries as $id => $e ) {
-			foreach ( (array) ( $related[ $e['postType'] ] ?? array() ) as $rule ) {
+			$ids_of[ $e['postType'] ][] = (int) $id;
+		}
+		foreach ( $ids_of as $source => $ids ) {
+			foreach ( (array) ( $related[ $source ] ?? array() ) as $rule ) {
 				if ( empty( $rule['post_type'] ) || empty( $rule['meta_key'] ) ) {
 					continue;
 				}
+				if ( count( $ids ) > $max ) {
+					self::$types[ $rule['post_type'] ] = true;
+					continue;
+				}
+				$list  = implode( '|', $ids );
 				$found = get_posts(
 					array(
 						'post_type'        => $rule['post_type'],
@@ -763,17 +842,11 @@ final class Collector {
 						'fields'           => 'ids',
 						'no_found_rows'    => true,
 						'suppress_filters' => false,
-						'meta_query'       => array( // phpcs:ignore WordPress.DB.SlowDBQuery.slow_db_query_meta_query -- one bounded lookup per changed post.
-							'relation' => 'OR',
+						'meta_query'       => array( // phpcs:ignore WordPress.DB.SlowDBQuery.slow_db_query_meta_query -- one bounded lookup per rule.
 							array(
 								'key'     => $rule['meta_key'],
-								'value'   => '"' . $id . '"',
-								'compare' => 'LIKE',
-							),
-							array(
-								'key'     => $rule['meta_key'],
-								'value'   => (string) $id,
-								'compare' => '=',
+								'value'   => '^(' . $list . ')$|"(' . $list . ')"',
+								'compare' => 'REGEXP',
 							),
 						),
 					)

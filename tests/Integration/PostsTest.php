@@ -368,6 +368,96 @@ final class PostsTest extends RevalidateTestCase {
 		$this->assertSame( $this->with_source( array( 'scope' => 'all' ) ), $this->flush() );
 	}
 
+	public function test_moving_a_parent_page_refreshes_the_old_and_new_address_of_its_children(): void {
+		$parent = $this->make( 'page', 'parent' );
+		$child  = self::factory()->post->create(
+			array(
+				'post_type'   => 'page',
+				'post_name'   => 'child',
+				'post_parent' => $parent,
+			)
+		);
+		$grand  = self::factory()->post->create(
+			array(
+				'post_type'   => 'page',
+				'post_name'   => 'grand',
+				'post_parent' => $child,
+			)
+		);
+		$draft  = self::factory()->post->create(
+			array(
+				'post_type'   => 'page',
+				'post_name'   => 'unseen',
+				'post_parent' => $parent,
+				'post_status' => 'draft',
+			)
+		);
+		Collector::reset();
+		wp_update_post(
+			array(
+				'ID'        => $parent,
+				'post_name' => 'renamed',
+			)
+		);
+		$paths = $this->flush()['paths'];
+		foreach ( array( '/parent/', '/renamed/', '/parent/child/', '/renamed/child/', '/parent/child/grand/', '/renamed/child/grand/' ) as $path ) {
+			$this->assertContains( $path, $paths );
+		}
+		$this->assertNotContains( '/parent/unseen/', $paths );
+		$this->assertGreaterThan( 0, $draft + $grand );
+	}
+
+	public function test_a_parent_with_more_children_than_the_limit_refreshes_everything(): void {
+		add_filter( 'shakewell_nextjs_revalidate_max_targets', static fn() => 3 );
+		$parent = $this->make( 'page', 'parent' );
+		foreach ( range( 1, 4 ) as $i ) {
+			self::factory()->post->create(
+				array(
+					'post_type'   => 'page',
+					'post_name'   => "c$i",
+					'post_parent' => $parent,
+				)
+			);
+		}
+		Collector::reset();
+		wp_update_post(
+			array(
+				'ID'        => $parent,
+				'post_name' => 'renamed',
+			)
+		);
+		$this->assertSame( $this->with_source( array( 'scope' => 'all' ) ), $this->flush() );
+	}
+
+	public function test_a_menu_type_needs_no_listing_to_report_its_title_change(): void {
+		add_filter( 'shakewell_nextjs_revalidate_menu_types', static fn() => array( 'page' ) );
+		$id = $this->make( 'page', 'about' );
+		wp_update_post(
+			array(
+				'ID'         => $id,
+				'post_title' => 'About us',
+			)
+		);
+		$this->assertSame( array( 'page' ), $this->flush()['types'] );
+	}
+
+	public function test_a_membership_change_outside_a_save_is_not_lost(): void {
+		add_filter( 'shakewell_nextjs_revalidate_membership_meta', static fn() => array( 'hidden' ) );
+		$id = $this->make( 'book', 'moby' );
+		update_post_meta( $id, 'hidden', '1' );
+		$body = $this->flush();
+		$this->assertSame( array( 'book' ), $body['types'] );
+		$this->assertContains( '/books/moby/', $body['paths'] );
+		wp_set_object_terms( $id, array( 'poetry' ), 'topic' );
+		$body = $this->flush();
+		$this->assertSame( array( 'book' ), $body['types'] );
+
+		$draft = $this->make( 'book', 'unseen', 'draft' );
+		update_post_meta( $draft, 'hidden', '1' );
+		wp_set_object_terms( $draft, array( 'poetry' ), 'topic' );
+		$this->assertNull( $this->flush(), 'a draft is not in any list' );
+	}
+
 	public function test_shutdown_is_hooked_once_per_request(): void {
 		remove_all_actions( 'shutdown' );
 		Collector::reset();

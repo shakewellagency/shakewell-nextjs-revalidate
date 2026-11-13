@@ -119,6 +119,15 @@ final class SiteChangesTest extends RevalidateTestCase {
 		$this->assertSame( $this->wide( 'all' ), $this->flush(), 'an unknown ACF object is treated as site-wide' );
 	}
 
+	public function test_acf_comment_forms_send_nothing_and_menu_fields_are_the_menus_scope(): void {
+		Collector::on_acf_save( 'comment_12' );
+		$this->assertNull( $this->flush() );
+		Collector::on_acf_save( 'menu_3' );
+		$this->assertSame( $this->wide( 'menus', 'menu' ), $this->flush() );
+		Collector::on_acf_save( 'nav_menu_item_12' );
+		$this->assertSame( $this->wide( 'menus', 'menu' ), $this->flush() );
+	}
+
 	public function test_acf_saving_a_published_post_refreshes_it_and_a_draft_does_not(): void {
 		$id = $this->make( 'book', 'moby' );
 		Collector::on_acf_save( $id );
